@@ -1,8 +1,8 @@
 import os, json, random, requests
 
-GROQ_KEY = os.environ["GROQ_API_KEY"]
-LI_TOKEN = os.environ["LINKEDIN_TOKEN"]
-LI_PERSON = os.environ["LINKEDIN_PERSON_ID"]
+GROQ_KEY = os.environ["GROQ_API_KEY"].strip()
+LI_TOKEN = os.environ["LINKEDIN_TOKEN"].strip()
+LI_PERSON = os.environ["LINKEDIN_PERSON_ID"].strip()
 
 state = json.load(open("state.json"))
 i = state["n"]
