@@ -1,4 +1,6 @@
-import os, json, random, requests
+import os, sys, json, random, requests
+
+sys.stdout.reconfigure(line_buffering=True)
 
 GROQ_KEY = os.environ["GROQ_API_KEY"].strip()
 LI_TOKEN = os.environ["LINKEDIN_TOKEN"].strip()
@@ -57,16 +59,16 @@ SYSTEM = ("You write LinkedIn posts for Hexalogic Tech Solutions, a software hou
           "Start with a strong one-line hook. 900-1300 characters. Short paragraphs. End with a question. "
           "Never invent statistics, client names or product features. Output only the post text, nothing else.")
 
-# ---------- Groq: pick a working model automatically ----------
+# ---------- Groq: try models until one returns real text ----------
 GROQ_HEADERS = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
-PREFERRED = ["llama-3.3-70b-versatile", "openai/gpt-oss-120b", "llama-3.1-8b-instant"]
+PREFERRED = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-120b", "openai/gpt-oss-20b"]
 
 models = list(PREFERRED)
 try:
     mr = requests.get("https://api.groq.com/openai/v1/models", headers=GROQ_HEADERS, timeout=30)
     if mr.ok:
         available = [m["id"] for m in mr.json().get("data", [])]
-        skip = ("whisper", "guard", "tts", "playai", "embed", "distil-whisper")
+        skip = ("whisper", "guard", "tts", "playai", "embed", "orpheus", "safeguard")
         chat = [m for m in available if not any(s in m.lower() for s in skip)]
         models = [m for m in PREFERRED if m in chat] + [m for m in chat if m not in PREFERRED]
     else:
@@ -76,19 +78,30 @@ except Exception as e:
 
 text = None
 for model in models[:6]:
-    r = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers=GROQ_HEADERS,
-        json={"model": model,
-              "messages": [{"role": "system", "content": SYSTEM},
-                           {"role": "user", "content": f"{task}\n\n{context}"}]},
-        timeout=60,
-    )
-    if r.ok:
-        text = r.json()["choices"][0]["message"]["content"].strip()
-        print("Used model:", model)
-        break
-    print("Model failed:", model, r.status_code, r.text)
+    body = {
+        "model": model,
+        "max_completion_tokens": 2500,
+        "messages": [{"role": "system", "content": SYSTEM},
+                     {"role": "user", "content": f"{task}\n\n{context}"}],
+    }
+    if "gpt-oss" in model:
+        body["reasoning_effort"] = "low"
+    try:
+        r = requests.post("https://api.groq.com/openai/v1/chat/completions",
+                          headers=GROQ_HEADERS, json=body, timeout=90)
+    except Exception as e:
+        print("Request error:", model, e)
+        continue
+    if not r.ok:
+        print("Model failed:", model, r.status_code, r.text[:300])
+        continue
+    content = (r.json()["choices"][0]["message"].get("content") or "").strip()
+    if len(content) < 200:
+        print("Model returned empty or too-short text, trying next:", model)
+        continue
+    text = content
+    print("Used model:", model)
+    break
 
 if not text:
     raise SystemExit("All Groq models failed, see errors above")
