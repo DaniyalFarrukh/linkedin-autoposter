@@ -18,20 +18,28 @@ TOPICS = {
     "lesson": ["estimating projects", "client communication", "code review habits", "technical debt"],
 }
 
-def hn_ai_items():
-    ids = requests.get("https://hacker-news.firebaseio.com/v0/topstories.json", timeout=30).json()[:60]
-    out = []
-    for id_ in ids:
-        it = requests.get(f"https://hacker-news.firebaseio.com/v0/item/{id_}.json", timeout=30).json()
-        t = (it or {}).get("title", "")
-        if any(k in t.lower() for k in ["ai", "llm", "claude", "gpt", "agent", "model", "open source"]):
-            out.append(f"{t} - {it.get('url','')}")
-    return out[:5]
 
+def hn_ai_items():
+    try:
+        ids = requests.get("https://hacker-news.firebaseio.com/v0/topstories.json", timeout=30).json()[:60]
+        out = []
+        for id_ in ids:
+            it = requests.get(f"https://hacker-news.firebaseio.com/v0/item/{id_}.json", timeout=30).json()
+            t = (it or {}).get("title", "")
+            if any(k in t.lower() for k in ["ai", "llm", "claude", "gpt", "agent", "model", "open source"]):
+                out.append(f"{t} - {it.get('url', '')}")
+        return out[:5]
+    except Exception as e:
+        print("Hacker News fetch failed:", e)
+        return []
+
+
+items = []
 if kind == "ai_tool":
     items = hn_ai_items()
     if not items:
         kind = "fullstack_tip"
+
 if kind == "ai_tool":
     context = "Recent items:\n" + "\n".join(items)
     task = "Pick the ONE most useful item for developers and write about it. Only mention facts present in the items."
@@ -45,33 +53,68 @@ else:
     }[kind]
 
 SYSTEM = ("You write LinkedIn posts for Hexalogic Tech Solutions, a software house (web, apps, AI, automation). "
-          "Tone: clear, human, no hype, no emojis spam (max 2), no hashtags except 3 at the end. "
+          "Tone: clear, human, no hype, no emoji spam (max 2), no hashtags except 3 at the end. "
           "Start with a strong one-line hook. 900-1300 characters. Short paragraphs. End with a question. "
-          "Never invent statistics, client names or product features.")
+          "Never invent statistics, client names or product features. Output only the post text, nothing else.")
 
-r = requests.post(
-    "https://api.groq.com/openai/v1/chat/completions",
-    headers={"Authorization": f"Bearer {GROQ_KEY}"},
-    json={"model": "llama-3.3-70b-versatile",  # if this errors, pick a current model from console.groq.com/docs/models
-          "messages": [{"role": "system", "content": SYSTEM},
-                       {"role": "user", "content": f"{task}\n\n{context}"}]},
-    timeout=60,
-)
-r.raise_for_status()
-text = r.json()["choices"][0]["message"]["content"].strip()
+# ---------- Groq: pick a working model automatically ----------
+GROQ_HEADERS = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
+PREFERRED = ["llama-3.3-70b-versatile", "openai/gpt-oss-120b", "llama-3.1-8b-instant"]
+
+models = list(PREFERRED)
+try:
+    mr = requests.get("https://api.groq.com/openai/v1/models", headers=GROQ_HEADERS, timeout=30)
+    if mr.ok:
+        available = [m["id"] for m in mr.json().get("data", [])]
+        skip = ("whisper", "guard", "tts", "playai", "embed", "distil-whisper")
+        chat = [m for m in available if not any(s in m.lower() for s in skip)]
+        models = [m for m in PREFERRED if m in chat] + [m for m in chat if m not in PREFERRED]
+    else:
+        print("Could not list Groq models:", mr.status_code, mr.text)
+except Exception as e:
+    print("Model list failed:", e)
+
+text = None
+for model in models[:6]:
+    r = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers=GROQ_HEADERS,
+        json={"model": model,
+              "messages": [{"role": "system", "content": SYSTEM},
+                           {"role": "user", "content": f"{task}\n\n{context}"}]},
+        timeout=60,
+    )
+    if r.ok:
+        text = r.json()["choices"][0]["message"]["content"].strip()
+        print("Used model:", model)
+        break
+    print("Model failed:", model, r.status_code, r.text)
+
+if not text:
+    raise SystemExit("All Groq models failed, see errors above")
+
+# ---------- LinkedIn: escape reserved characters so posts are not cut off ----------
+def li_escape(s):
+    for ch in ['\\', '|', '{', '}', '@', '[', ']', '(', ')', '<', '>', '*', '_', '~']:
+        s = s.replace(ch, '\\' + ch)
+    return s
+
 
 p = requests.post(
     "https://api.linkedin.com/rest/posts",
     headers={"Authorization": f"Bearer {LI_TOKEN}", "LinkedIn-Version": "202504",
              "X-Restli-Protocol-Version": "2.0.0", "Content-Type": "application/json"},
-    json={"author": f"urn:li:person:{LI_PERSON}", "commentary": text, "visibility": "PUBLIC",
-          "distribution": {"feedDistribution": "MAIN_FEED"}, "lifecycleState": "PUBLISHED"},
+    json={"author": f"urn:li:person:{LI_PERSON}", "commentary": li_escape(text),
+          "visibility": "PUBLIC",
+          "distribution": {"feedDistribution": "MAIN_FEED",
+                           "targetEntities": [], "thirdPartyDistributionChannels": []},
+          "lifecycleState": "PUBLISHED", "isReshareDisabledByAuthor": False},
     timeout=60,
 )
 if not p.ok:
-    print(p.status_code, p.text)
-p.raise_for_status()
+    print("LinkedIn error:", p.status_code, p.text)
+    raise SystemExit(1)
 
 state["n"] = i + 1
 json.dump(state, open("state.json", "w"))
-print(text)
+print("Posted successfully:\n", text)
