@@ -1,4 +1,5 @@
 import os, sys, json, random, requests
+from datetime import date
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -106,27 +107,57 @@ for model in models[:6]:
 if not text:
     raise SystemExit("All Groq models failed, see errors above")
 
-# ---------- LinkedIn: escape reserved characters so posts are not cut off ----------
+
+# ---------- LinkedIn ----------
 def li_escape(s):
+    # escape characters LinkedIn treats as formatting so posts are not cut off
     for ch in ['\\', '|', '{', '}', '@', '[', ']', '(', ')', '<', '>', '*', '_', '~']:
         s = s.replace(ch, '\\' + ch)
     return s
 
 
-p = requests.post(
-    "https://api.linkedin.com/rest/posts",
-    headers={"Authorization": f"Bearer {LI_TOKEN}", "LinkedIn-Version": "202504",
-             "X-Restli-Protocol-Version": "2.0.0", "Content-Type": "application/json"},
-    json={"author": f"urn:li:person:{LI_PERSON}", "commentary": li_escape(text),
-          "visibility": "PUBLIC",
-          "distribution": {"feedDistribution": "MAIN_FEED",
-                           "targetEntities": [], "thirdPartyDistributionChannels": []},
-          "lifecycleState": "PUBLISHED", "isReshareDisabledByAuthor": False},
-    timeout=60,
-)
-if not p.ok:
-    print("LinkedIn error:", p.status_code, p.text)
-    raise SystemExit(1)
+def candidate_versions(n=14):
+    # current month first, then going back month by month
+    y, m = date.today().year, date.today().month
+    out = []
+    for _ in range(n):
+        out.append(f"{y}{m:02d}")
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+    return out
+
+
+payload = {
+    "author": f"urn:li:person:{LI_PERSON}",
+    "commentary": li_escape(text),
+    "visibility": "PUBLIC",
+    "distribution": {"feedDistribution": "MAIN_FEED",
+                     "targetEntities": [], "thirdPartyDistributionChannels": []},
+    "lifecycleState": "PUBLISHED",
+    "isReshareDisabledByAuthor": False,
+}
+
+posted = False
+for ver in candidate_versions():
+    p = requests.post(
+        "https://api.linkedin.com/rest/posts",
+        headers={"Authorization": f"Bearer {LI_TOKEN}", "LinkedIn-Version": ver,
+                 "X-Restli-Protocol-Version": "2.0.0", "Content-Type": "application/json"},
+        json=payload, timeout=60,
+    )
+    if p.status_code == 426:
+        print("LinkedIn version not active, trying older:", ver)
+        continue
+    if not p.ok:
+        print("LinkedIn error:", p.status_code, p.text)
+        raise SystemExit(1)
+    print("Posted using LinkedIn version", ver)
+    posted = True
+    break
+
+if not posted:
+    raise SystemExit("No active LinkedIn API version found, check LinkedIn's docs")
 
 state["n"] = i + 1
 json.dump(state, open("state.json", "w"))
